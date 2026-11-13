@@ -4,7 +4,7 @@
 
 A tiny macOS menu bar reminder app that refuses to be ignored.
 
-Add a reminder in two seconds; when it's due, Blink takes over **every screen** with a huge, animated alert (and, if you like, a monster engine start) until you deal with it.
+Add a reminder in two seconds; when it's due, Blink takes over **every screen** with a huge, animated alert (and a V8 engine roar that shakes the screen) until you deal with it.
 
 ## Install
 
@@ -38,13 +38,17 @@ Building it yourself means no Gatekeeper “unidentified developer” warning. T
 - Or **drag the timeline**, tap a quick time (15m, 1h, 3h, Tonight, Tomorrow) or pick a date from the calendar.
 - **Upcoming** lists everything grouped by day; hover a row to finish it early ✓ or delete it ✕ (with undo).
 - **History** shows what already went off and how you handled it; hover to bring one back in 15 minutes.
-- **Sound menu** (bottom left): Chime, Monster engine start, Silent, or **Your own sound…** to use any audio file.
+- **Sound menu** (bottom left): V8 engine (default), Chime, Silent, or **Your own sound…** to use any audio file. The engine plays to the end and loops until you respond, and the screen shakes with its loudness.
+
+### Engine sound
+
+The repo ships a synthesized engine start. For a real recording, put your own file at `sounds/engine.m4a` (or `.mp3`/`.wav`) before running `./build.sh`; it gets bundled instead. The `sounds/` folder is git-ignored, so recordings you don't own the rights to never end up in the repo.
 
 When a reminder is due:
 
 | Key | Action |
 | --- | --- |
-| ↩ | Got it (confetti) |
+| ↩ | Got It (confetti) |
 | 1 / 2 / 3 | Snooze 5 min / 15 min / 1 hour |
 | Esc | Snooze 5 min |
 
@@ -54,7 +58,7 @@ Reminders missed while your Mac was asleep fire as soon as it wakes.
 
 - `Blink.swift`: the whole app (SwiftUI + AppKit, no dependencies)
 - `build.sh`: builds, signs ad hoc, installs and launches
-- `tools/icon.swift`: draws the app icon
+- `tools/icon.swift`: draws the app icon (flat, no gradients)
 - `tools/sounds.py`: synthesizes the chime, pop, done and engine sounds from scratch
 
 Your data lives in `~/Library/Application Support/Blink/`.

@@ -1,6 +1,7 @@
 // Blink — a tiny menu bar reminder app that refuses to be ignored.
 import SwiftUI
 import AppKit
+import AVFoundation
 import Carbon.HIToolbox
 import ServiceManagement
 import UniformTypeIdentifiers
@@ -17,8 +18,8 @@ enum Palette {
     static let all = [coral, pink, violet, amber, teal, sky]
 }
 
-let warm = LinearGradient(colors: [Color(red: 1, green: 0.62, blue: 0.3), Color(red: 1, green: 0.3, blue: 0.52)],
-                          startPoint: .topLeading, endPoint: .bottomTrailing)
+/// The one accent color. Solid on purpose — no gradients anywhere.
+let warm = Color(red: 1, green: 0.36, blue: 0.38)
 
 extension Font {
     static func r(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font { .system(size: size, weight: weight, design: .rounded) }
@@ -130,7 +131,7 @@ final class Store: ObservableObject {
 
     private init() {
         alert = AlertSound(rawValue: UserDefaults.standard.string(forKey: "alertSound") ?? "")
-            ?? (UserDefaults.standard.object(forKey: "soundOn") as? Bool == false ? .off : .chime)
+            ?? (UserDefaults.standard.object(forKey: "soundOn") as? Bool == false ? .off : .engine)
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Blink", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -217,47 +218,71 @@ enum AlertSound: String, CaseIterable, Identifiable {
     case chime, engine, custom, off
     var id: String { rawValue }
     var label: String {
-        switch self { case .chime: "Chime"; case .engine: "Monster engine start"; case .custom: "Your own sound…"; case .off: "Silent" }
+        switch self { case .chime: "Chime"; case .engine: "V8 engine (default)"; case .custom: "Your own sound…"; case .off: "Silent" }
     }
 }
 
 @MainActor
 enum Sounds {
     private static var live: [NSSound] = []
+    private static var alertPlayer: AVAudioPlayer?
 
     static var customURL: URL? {
         (try? FileManager.default.contentsOfDirectory(at: Store.dir, includingPropertiesForKeys: nil))?
             .first { $0.lastPathComponent.hasPrefix("custom-sound.") }
     }
 
+    /// A real engine recording bundled at build time (engine-real.*) wins over the synthesized engine.wav.
+    static var engineURL: URL? {
+        for ext in ["m4a", "mp3", "wav", "aiff"] {
+            if let u = Bundle.main.url(forResource: "engine-real", withExtension: ext) { return u }
+        }
+        return Bundle.main.url(forResource: "engine", withExtension: "wav")
+    }
+
     static func play(_ s: Sound) {
         guard Store.shared.soundOn else { return }
-        if let url = Bundle.main.url(forResource: s.rawValue, withExtension: "wav") { start(url) } else { NSSound(named: "Glass")?.play() }
-    }
-
-    /// The reminder alert, using whatever sound is picked.
-    static func alert() {
-        switch Store.shared.alert {
-        case .chime: play(.chime)
-        case .engine: play(.engine)
-        case .custom: if let u = customURL { start(u) } else { play(.chime) }
-        case .off: break
-        }
-    }
-
-    static func stopAll() { live.forEach { $0.stop() }; live.removeAll() }
-
-    private static func start(_ url: URL) {
-        guard let snd = NSSound(contentsOf: url, byReference: true) else { return }
+        guard let url = Bundle.main.url(forResource: s.rawValue, withExtension: "wav"),
+              let snd = NSSound(contentsOf: url, byReference: true) else { NSSound(named: "Glass")?.play(); return }
         live.append(snd); if live.count > 6 { live.removeFirst() }
         snd.play()
+    }
+
+    /// The reminder alert. With `loop`, it plays to the end and starts over until stopped.
+    static func alert(loop: Bool = false) {
+        let url: URL?
+        switch Store.shared.alert {
+        case .chime: url = Bundle.main.url(forResource: "chime", withExtension: "wav")
+        case .engine: url = engineURL
+        case .custom: url = customURL ?? engineURL
+        case .off: url = nil
+        }
+        guard let url, let p = try? AVAudioPlayer(contentsOf: url) else { return }
+        alertPlayer?.stop()
+        p.isMeteringEnabled = true
+        p.numberOfLoops = loop ? -1 : 0
+        p.play()
+        alertPlayer = p
+    }
+
+    /// How loud the alert is right now, 0…1 (drives the screen shake).
+    static func level() -> Double {
+        guard let p = alertPlayer, p.isPlaying else { return 0 }
+        p.updateMeters()
+        let db = Double(max(p.averagePower(forChannel: 0), p.numberOfChannels > 1 ? p.averagePower(forChannel: 1) : -160))
+        return max(0, min(1, (db + 26) / 22)) // -26 dB → 0, -4 dB → 1
+    }
+
+    static func stopAll() {
+        alertPlayer?.stop(); alertPlayer = nil
+        live.forEach { $0.stop() }; live.removeAll()
     }
 
     static func chooseCustom() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.audio]
         panel.title = "Pick your reminder sound"
-        panel.prompt = "Use this sound"
+        panel.prompt = "Use This Sound"
         NSApp.activate(ignoringOtherApps: true)
         guard panel.runModal() == .OK, let src = panel.url else { return }
         let fm = FileManager.default
@@ -378,6 +403,7 @@ struct EmojiBadge: View {
             .frame(width: size, height: size)
             .background(Circle().fill(tint.opacity(0.2)))
             .overlay(Circle().strokeBorder(tint.opacity(0.4), lineWidth: 1))
+            .accessibilityHidden(true)
     }
 }
 
@@ -385,6 +411,7 @@ struct Pill: View {
     let label: String
     var icon: String?
     var on = false
+    @State private var hover = false
     var body: some View {
         HStack(spacing: 4) {
             if let icon { Image(systemName: icon).font(.system(size: 9, weight: .bold)) }
@@ -392,9 +419,10 @@ struct Pill: View {
         }
         .font(.r(11, .semibold))
         .padding(.horizontal, 10).padding(.vertical, 6)
-        .background(Capsule().fill(on ? AnyShapeStyle(warm) : AnyShapeStyle(.primary.opacity(0.07))))
+        .background(Capsule().fill(on ? AnyShapeStyle(warm) : AnyShapeStyle(.primary.opacity(hover ? 0.14 : 0.07))))
         .foregroundStyle(on ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
         .contentShape(Capsule())
+        .onHover { hover = $0 }
     }
 }
 
@@ -471,12 +499,9 @@ struct TimeScrubber: View {
                         t += 300
                     }
                 }
-                .mask(LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.18),
-                                             .init(color: .black, location: 0.82), .init(color: .clear, location: 1)],
-                                     startPoint: .leading, endPoint: .trailing))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
 
                 Capsule().fill(warm).frame(width: 3, height: h - 4)
-                    .shadow(color: Palette.pink.opacity(0.7), radius: base != nil ? 8 : 3)
                 Triangle().fill(warm).frame(width: 10, height: 6).offset(y: -h / 2 + 3)
             }
         }
@@ -500,6 +525,16 @@ struct TimeScrubber: View {
             }
             .onEnded { _ in base = nil })
         .help("Drag to pick a time")
+        .accessibilityElement()
+        .accessibilityLabel("Reminder time")
+        .accessibilityValue(Fmt.when(target))
+        .accessibilityAdjustableAction { dir in
+            switch dir {
+            case .increment: target = target.addingTimeInterval(300)
+            case .decrement: target = max(target.addingTimeInterval(-300), now.addingTimeInterval(60))
+            default: break
+            }
+        }
     }
 }
 
@@ -594,7 +629,7 @@ struct Composer: View {
                 if allowCalendar {
                     Spacer(minLength: 0)
                     Button { showCal.toggle() } label: { Pill(label: "", icon: "calendar") }
-                        .buttonStyle(.plain).help("Pick a date")
+                        .buttonStyle(.plain).help("Pick a date").accessibilityLabel("Pick a date")
                         .popover(isPresented: $showCal, arrowEdge: .bottom) {
                             DatePicker("", selection: Binding(get: { target }, set: { target = $0; chip = nil }),
                                        in: Date()..., displayedComponents: [.date, .hourAndMinute])
@@ -605,7 +640,7 @@ struct Composer: View {
 
             Button(action: add) {
                 HStack {
-                    Text(title.isEmpty ? "Remind me" : "Remind me \(Fmt.day(target).lowercased()) at \(Fmt.time(target))")
+                    Text(title.isEmpty ? "Remind Me" : "Remind Me \(Fmt.day(target)) at \(Fmt.time(target))")
                         .lineLimit(1)
                     Spacer()
                     Keycap(text: "↩").foregroundStyle(.white).colorScheme(.dark)
@@ -614,7 +649,6 @@ struct Composer: View {
                 .padding(.horizontal, 14).padding(.vertical, 10)
                 .background(RoundedRectangle(cornerRadius: 12).fill(warm).opacity(title.isEmpty ? 0.45 : 1))
                 .foregroundStyle(.white)
-                .shadow(color: Palette.pink.opacity(title.isEmpty ? 0 : 0.35), radius: 10, y: 4)
             }
             .buttonStyle(.plain)
             .keyboardShortcut(.defaultAction)
@@ -697,6 +731,7 @@ struct PopoverView: View {
 
             if let n = store.next {
                 HeroCard(r: n, now: store.now)
+                    .contextMenu { reminderMenu(n) }
                     .transition(.asymmetric(insertion: .scale(scale: 0.95).combined(with: .opacity), removal: .opacity))
             }
 
@@ -735,11 +770,6 @@ struct PopoverView: View {
         }
         .padding(16)
         .frame(width: 372)
-        .background(alignment: .top) {
-            RadialGradient(colors: [Palette.pink.opacity(0.22), Palette.coral.opacity(0.08), .clear],
-                           center: .top, startRadius: 0, endRadius: 260)
-                .frame(height: 260).allowsHitTesting(false)
-        }
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: store.reminders)
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: store.undo?.reminder.id)
     }
@@ -790,6 +820,7 @@ struct PopoverView: View {
                         sectionHeader(g.0, g.1.count)
                         ForEach(g.1) { r in
                             Row(r: r, now: store.now)
+                                .contextMenu { reminderMenu(r) }
                                 .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity),
                                                         removal: .move(edge: .trailing).combined(with: .opacity)))
                         }
@@ -810,7 +841,11 @@ struct PopoverView: View {
                 LazyVStack(alignment: .leading, spacing: 2) {
                     ForEach(historyGroups, id: \.0) { g in
                         sectionHeader(g.0, g.1.count)
-                        ForEach(g.1) { PastRow(p: $0) }
+                        ForEach(g.1) { p in
+                            PastRow(p: p).contextMenu {
+                                Button("Remind Again in 15 Minutes") { withAnimation(.spring) { store.again(p) } }
+                            }
+                        }
                     }
                 }
             }
@@ -866,11 +901,12 @@ struct PopoverView: View {
                 Image(systemName: loginOn ? "sunrise.fill" : "sunrise")
             }
             .buttonStyle(.plain).help(loginOn ? "Opens at login" : "Open at login")
+            .accessibilityLabel(loginOn ? "Open at login: on" : "Open at login: off")
 
             Spacer()
             HStack(spacing: 3) { Keycap(text: "⌥⌘B"); Text("quick add") }.help("Press anywhere to add a reminder")
             Button { NSApp.terminate(nil) } label: { Image(systemName: "power") }
-                .buttonStyle(.plain).help("Quit Blink")
+                .buttonStyle(.plain).help("Quit Blink").accessibilityLabel("Quit Blink")
         }
         .font(.r(11, .medium))
         .foregroundStyle(.secondary)
@@ -933,13 +969,20 @@ struct HeroCard: View {
 }
 
 @ViewBuilder
+func reminderMenu(_ r: Reminder) -> some View {
+    Button(r.rep == .none ? "Done Early" : "Skip This One") { withAnimation(.spring) { Store.shared.complete(r) } }
+    Divider()
+    Button("Delete", role: .destructive) { withAnimation(.spring) { Store.shared.remove(r) } }
+}
+
+@ViewBuilder
 func iconButton(_ name: String, help: String, _ action: @escaping () -> Void) -> some View {
     Button { withAnimation(.spring) { action() } } label: {
         Image(systemName: name).font(.system(size: 11, weight: .bold))
             .frame(width: 26, height: 26)
             .background(Circle().fill(.primary.opacity(0.08)))
     }
-    .buttonStyle(.plain).help(help)
+    .buttonStyle(.plain).help(help).accessibilityLabel(help)
 }
 
 struct Row: View {
@@ -994,7 +1037,7 @@ struct PastRow: View {
             Spacer()
             if hover {
                 Button { withAnimation(.spring) { Store.shared.again(p) }; Sounds.play(.pop) } label: {
-                    Label("again in 15m", systemImage: "arrow.uturn.forward")
+                    Label("Again in 15m", systemImage: "arrow.uturn.forward")
                         .font(.r(10, .semibold))
                         .padding(.horizontal, 8).padding(.vertical, 5)
                         .background(Capsule().fill(.primary.opacity(0.08)))
@@ -1050,7 +1093,7 @@ struct QuickAddView: View {
                         Circle().fill(warm).frame(width: 64, height: 64).shadow(color: Palette.pink.opacity(0.6), radius: 20)
                         Image(systemName: "checkmark").font(.system(size: 28, weight: .heavy)).foregroundStyle(.white)
                     }
-                    Text("Noted. I'll blink.").font(.r(18, .bold))
+                    Text("Saved. Blink’s on it.").font(.r(18, .bold))
                 }
                 .transition(.scale(scale: 0.6).combined(with: .opacity))
             }
@@ -1059,10 +1102,6 @@ struct QuickAddView: View {
         .frame(width: 540)
         .background(VisualEffect(material: .hudWindow, radius: 26))
         .overlay(RoundedRectangle(cornerRadius: 26).strokeBorder(.white.opacity(0.12)))
-        .background(alignment: .top) {
-            RadialGradient(colors: [Palette.pink.opacity(0.25), .clear], center: .top, startRadius: 0, endRadius: 300)
-                .clipShape(RoundedRectangle(cornerRadius: 26)).allowsHitTesting(false)
-        }
         .onExitCommand(perform: close)
     }
 }
@@ -1129,36 +1168,17 @@ final class OverlayWindow: NSWindow {
 
 @MainActor
 final class OverlayModel: ObservableObject {
+    @Published var rumble: CGSize = .zero
     @Published var celebrateAt: Date?
     @Published var farewell: String?
-}
-
-struct Aurora: View {
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 1 / 30)) { tl in
-            let t = tl.date.timeIntervalSinceReferenceDate
-            Canvas { ctx, size in
-                ctx.addFilter(.blur(radius: 110))
-                let blobs: [(Color, Double, Double)] = [
-                    (Palette.coral, 0.11, 0.34), (Palette.pink, 0.08, 0.30), (Palette.violet, 0.06, 0.38), (Palette.amber, 0.09, 0.22),
-                ]
-                for (i, b) in blobs.enumerated() {
-                    let k = Double(i) * 1.7
-                    let x = size.width * (0.5 + 0.32 * cos(t * b.1 + k))
-                    let y = size.height * (0.5 + 0.28 * sin(t * b.1 * 1.4 + k * 2))
-                    let r = min(size.width, size.height) * b.2
-                    ctx.fill(Path(ellipseIn: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2)), with: .color(b.0.opacity(0.55)))
-                }
-            }
-        }
-    }
 }
 
 struct Bell: View {
     let emoji: String
     let start: Date
+    var still = false
     var body: some View {
-        TimelineView(.animation) { tl in
+        TimelineView(.animation(minimumInterval: nil, paused: still)) { tl in
             let t = tl.date.timeIntervalSince(start)
             let ringPhase = t.truncatingRemainder(dividingBy: 3)
             let env = max(0, 1 - ringPhase / 0.9)
@@ -1171,7 +1191,6 @@ struct Bell: View {
                         .opacity((1 - p) * 0.75)
                 }
                 Circle().fill(warm).frame(width: 180, height: 180)
-                    .shadow(color: Palette.pink.opacity(0.75), radius: 70)
                     .scaleEffect(1 + 0.035 * sin(t * 3.5))
                 Text(emoji).font(.system(size: 96))
                     .rotationEffect(.degrees(sin(t * 30) * 18 * env), anchor: .top)
@@ -1231,15 +1250,14 @@ struct OverlayView: View {
     let onSnooze: (TimeInterval, String) -> Void
     @State private var start = Date()
     @State private var shown = false
-    @State private var rumble = CGSize.zero
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var leaving: Bool { model.celebrateAt != nil || model.farewell != nil }
 
     var body: some View {
         ZStack {
             VisualEffect(material: .fullScreenUI, dark: true)
-            Color(red: 0.06, green: 0.02, blue: 0.1).opacity(0.6)
-            Aurora().opacity(0.9)
+            Color(red: 0.07, green: 0.05, blue: 0.09).opacity(0.84)
 
             VStack {
                 HStack {
@@ -1264,7 +1282,7 @@ struct OverlayView: View {
             }
 
             VStack(spacing: 22) {
-                Bell(emoji: reminder.emoji, start: start)
+                Bell(emoji: reminder.emoji, start: start, still: reduceMotion)
                     .scaleEffect(shown ? 1 : 0.6)
                     .padding(.bottom, -40)
 
@@ -1275,7 +1293,6 @@ struct OverlayView: View {
                     .minimumScaleFactor(0.35)
                     .lineLimit(3)
                     .padding(.horizontal, 100)
-                    .shadow(color: .black.opacity(0.3), radius: 20, y: 6)
 
                 HStack(spacing: 10) {
                     Text(subtitle)
@@ -1294,13 +1311,12 @@ struct OverlayView: View {
                     Button(action: onDone) {
                         HStack(spacing: 10) {
                             Image(systemName: "checkmark")
-                            Text("Got it")
+                            Text("Got It")
                         }
                         .font(.r(19, .bold))
                         .padding(.horizontal, 34).padding(.vertical, 16)
                         .background(Capsule().fill(.white))
                         .foregroundStyle(.black)
-                        .shadow(color: .white.opacity(0.35), radius: 24)
                     }
                     .buttonStyle(Press())
                     .keyboardShortcut(primary ? .defaultAction : nil)
@@ -1319,7 +1335,7 @@ struct OverlayView: View {
                     Button("") { onSnooze(300, "5 min") }.keyboardShortcut(.cancelAction).opacity(0).frame(width: 0, height: 0)
                 }
             }
-            .offset(rumble)
+            .offset(model.rumble)
             .opacity(shown && !leaving ? 1 : 0)
             .scaleEffect(leaving ? 1.06 : shown ? 1 : 0.94)
             .blur(radius: leaving ? 12 : 0)
@@ -1331,27 +1347,13 @@ struct OverlayView: View {
             if let c = model.celebrateAt {
                 Text("Nice. ✨").font(.r(72, .heavy)).foregroundStyle(.white)
                     .transition(.scale(scale: 0.5).combined(with: .opacity))
-                Confetti(start: c)
+                if !reduceMotion { Confetti(start: c) }
             }
         }
         .ignoresSafeArea()
         .animation(.spring(response: 0.45, dampingFraction: 0.8), value: leaving)
         .onAppear {
             withAnimation(.spring(response: 0.7, dampingFraction: 0.7).delay(0.05)) { shown = true }
-            if Store.shared.alert == .engine { shake() }
-        }
-    }
-
-    /// The whole screen rumbles when the engine catches, and again on each throttle blip.
-    private func shake() {
-        for (at, len, power) in [(0.98, 0.9, 9.0), (2.7, 0.4, 5.0), (3.76, 0.5, 7.0)] {
-            let frames = Int(len * 40)
-            for i in 0...frames {
-                DispatchQueue.main.asyncAfter(deadline: .now() + at + Double(i) / 40) {
-                    let k = power * (1 - Double(i) / Double(frames))
-                    rumble = i == frames ? .zero : CGSize(width: .random(in: -k...k), height: .random(in: -k * 0.7...k * 0.7))
-                }
-            }
         }
     }
 
@@ -1392,6 +1394,7 @@ final class Overlay {
     private var windows: [NSWindow] = []
     private var model = OverlayModel()
     private var soundTimer: Timer?
+    private var rumbleTimer: Timer?
     private var leaving = false
     private var current: Reminder?
 
@@ -1426,16 +1429,20 @@ final class Overlay {
             windows.append(w)
         }
         NSApp.activate(ignoringOtherApps: true)
-        Sounds.alert()
-        soundTimer = Timer.scheduledTimer(withTimeInterval: Store.shared.alert == .engine ? 20 : 15, repeats: true) { _ in
-            Task { @MainActor in Sounds.alert() }
+        if Store.shared.alert == .chime {
+            Sounds.alert()
+            soundTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { _ in Task { @MainActor in Sounds.alert() } }
+        } else {
+            Sounds.alert(loop: true) // plays to the end, then loops until you deal with it
         }
+        startRumble()
     }
 
     func done() {
         guard !leaving else { return }
         leaving = true
         soundTimer?.invalidate()
+        stopRumble()
         Sounds.stopAll()
         if let r = current { Store.shared.log(r, .done) }
         Sounds.play(.done)
@@ -1447,12 +1454,30 @@ final class Overlay {
         guard !leaving else { return }
         leaving = true
         soundTimer?.invalidate()
+        stopRumble()
         Sounds.stopAll()
         Store.shared.log(r, .snoozed, label)
         Store.shared.add(r.text, at: Date().addingTimeInterval(secs))
         Sounds.play(.pop)
         withAnimation { model.farewell = "See you in \(label) 👋" }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { Overlay.shared.close() }
+    }
+
+    /// The screen shakes with the engine — driven by how loud the recording is at this exact moment.
+    private func startRumble() {
+        guard Store.shared.alert != .chime, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        rumbleTimer = Timer.scheduledTimer(withTimeInterval: 1 / 30, repeats: true) { _ in
+            Task { @MainActor in
+                let lv = Sounds.level()
+                let k = 12 * pow(max(0, lv - 0.45) / 0.55, 1.5)
+                Overlay.shared.model.rumble = k < 0.4 ? .zero : CGSize(width: .random(in: -k...k), height: .random(in: -k * 0.6...k * 0.6))
+            }
+        }
+    }
+
+    private func stopRumble() {
+        rumbleTimer?.invalidate(); rumbleTimer = nil
+        model.rumble = .zero
     }
 
     private func close() {

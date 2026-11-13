@@ -23,6 +23,10 @@ iconutil -c icns "$ICONSET" -o "$RES/AppIcon.icns"
 
 echo "→ synthesizing sounds"
 python3 tools/sounds.py "$RES"
+# A real engine recording, if you have one (sounds/engine.m4a|mp3|wav — kept out of git), beats the synth.
+for f in sounds/engine.m4a sounds/engine.mp3 sounds/engine.wav; do
+  if [ -f "$f" ]; then cp "$f" "$RES/engine-real.${f##*.}"; echo "  using $f"; break; fi
+done
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
