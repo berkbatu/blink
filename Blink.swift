@@ -6,6 +6,9 @@ import Carbon.HIToolbox
 import ServiceManagement
 import UniformTypeIdentifiers
 
+/// Set by `Blink --snapshots <dir>`: renders README screenshots with sample data and never touches your files.
+var snapshotMode = false
+
 // MARK: - Look
 
 enum Palette {
@@ -202,10 +205,12 @@ final class Store: ObservableObject {
     func again(_ p: Past) { add(p.text, at: Date().addingTimeInterval(15 * 60)) }
 
     private func saveHistory() {
+        guard !snapshotMode else { return }
         if let data = try? JSONEncoder().encode(history) { try? data.write(to: historyURL, options: .atomic) }
     }
 
     private func save() {
+        guard !snapshotMode else { return }
         if let data = try? JSONEncoder().encode(reminders) { try? data.write(to: url, options: .atomic) }
     }
 }
@@ -439,7 +444,15 @@ struct VisualEffect: NSViewRepresentable {
     var material: NSVisualEffectView.Material = .fullScreenUI
     var radius: CGFloat = 0
     var dark = false
-    func makeNSView(context: Context) -> NSVisualEffectView {
+    func makeNSView(context: Context) -> NSView {
+        if snapshotMode { // offscreen renders can't blur the desktop — use the solid color it would settle on
+            let s = NSView(); s.wantsLayer = true
+            let isDark = dark || context.environment.colorScheme == .dark
+            s.layer?.backgroundColor = (isDark ? NSColor(calibratedRed: 0.15, green: 0.14, blue: 0.16, alpha: 1)
+                                              : NSColor(calibratedWhite: 0.965, alpha: 1)).cgColor
+            s.layer?.cornerRadius = radius
+            return s
+        }
         let v = NSVisualEffectView()
         v.material = material; v.blendingMode = .behindWindow; v.state = .active
         if dark { v.appearance = NSAppearance(named: .darkAqua) }
@@ -452,7 +465,7 @@ struct VisualEffect: NSViewRepresentable {
         }
         return v
     }
-    func updateNSView(_ v: NSVisualEffectView, context: Context) {}
+    func updateNSView(_ v: NSView, context: Context) {}
 }
 
 // MARK: - Time scrubber: drag the timeline, the needle is "when"
@@ -564,6 +577,7 @@ struct QuickTime: Identifiable {
 struct Composer: View {
     var big = false
     var allowCalendar = true
+    var initialText = ""
     var onAdded: () -> Void = {}
 
     @ObservedObject private var store = Store.shared
@@ -660,6 +674,7 @@ struct Composer: View {
         }
         .onAppear {
             if let c = QuickTime.all.first(where: { $0.id == chip }) { target = c.make() }
+            if text.isEmpty && !initialText.isEmpty { text = initialText }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { focused = true }
         }
     }
@@ -704,6 +719,8 @@ struct PopoverView: View {
     @State private var loginOn = SMAppService.mainApp.status == .enabled
     @State private var tab: Tab = .upcoming
     @Namespace private var ns
+
+    init(startTab: Tab = .upcoming) { _tab = State(initialValue: startTab) }
 
     private var rest: [Reminder] { Array(store.upcoming.dropFirst()) }
     private var groups: [(String, [Reminder])] {
@@ -1076,11 +1093,12 @@ final class KeyPanel: NSPanel {
 
 struct QuickAddView: View {
     let close: () -> Void
+    var initialText = ""
     @State private var saved = false
 
     var body: some View {
         ZStack {
-            Composer(big: true, allowCalendar: false) {
+            Composer(big: true, allowCalendar: false, initialText: initialText) {
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) { saved = true }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { close() }
             }
@@ -1498,11 +1516,91 @@ final class Overlay {
     }
 }
 
+// MARK: - Snapshots (README screenshots)
+
+@MainActor
+enum Snapshots {
+    private static var windows: [(NSWindow, String)] = []
+
+    static func run(_ dirPath: String) {
+        snapshotMode = true
+        let dir = URL(fileURLWithPath: dirPath)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        seed()
+
+        let desk = Color(red: 0.23, green: 0.25, blue: 0.31)
+        let paper = Color(red: 0.86, green: 0.87, blue: 0.9)
+        func panel(_ tab: PopoverView.Tab) -> some View {
+            PopoverView(startTab: tab)
+                .background(VisualEffect(material: .popover, radius: 16))
+                .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.primary.opacity(0.1)))
+        }
+        add(panel(.upcoming).padding(36).background(paper), dark: false, "popover-light")
+        add(panel(.upcoming).padding(36).background(desk), dark: true, "popover-dark")
+        add(panel(.history).padding(36).background(desk), dark: true, "history")
+        add(QuickAddView(close: {}, initialText: "standup every weekday 9:30").padding(56).background(desk), dark: true, "quick-add")
+        add(OverlayView(reminder: Reminder(text: "Drink water, you camel", date: Date()), primary: true, model: OverlayModel(),
+                        onDone: {}, onSnooze: { _, _ in })
+                .frame(width: 1512, height: 945), dark: true, "alert")
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            for (w, name) in windows {
+                guard let v = w.contentView else { continue }
+                v.layoutSubtreeIfNeeded()
+                if let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) {
+                    v.cacheDisplay(in: v.bounds, to: rep)
+                    try? rep.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent(name + ".png"))
+                    print("wrote \(name).png \(Int(rep.size.width))×\(Int(rep.size.height))")
+                }
+            }
+            exit(0)
+        }
+    }
+
+    private static func add<V: View>(_ view: V, dark: Bool, _ name: String) {
+        let hv = NSHostingView(rootView: view.environment(\.colorScheme, dark ? .dark : .light))
+        let size = hv.fittingSize
+        let w = NSWindow(contentRect: NSRect(x: -8000, y: -8000, width: size.width, height: size.height),
+                         styleMask: .borderless, backing: .buffered, defer: false)
+        w.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        w.isReleasedWhenClosed = false
+        w.contentView = hv
+        w.orderFrontRegardless()
+        windows.append((w, name))
+    }
+
+    private static func seed() {
+        let st = Store.shared, now = Date(), cal = Calendar.current
+        func r(_ t: String, _ d: Date, _ rep: Repeat = .none, created: Double = -25) -> Reminder {
+            var x = Reminder(text: t, date: d, rep: rep); x.created = now.addingTimeInterval(created * 60); return x
+        }
+        func day(_ dd: Int, _ h: Int, _ m: Int) -> Date {
+            cal.date(bySettingHour: h, minute: m, second: 0, of: cal.date(byAdding: .day, value: dd, to: now)!)!
+        }
+        func mins(_ m: Double) -> Date { now.addingTimeInterval(m * 60 + 20) }
+        st.reminders = [
+            r("Drink water", mins(8), created: -22), r("Call mom", mins(34)), r("Stretch your back", mins(75), .daily),
+            r("Standup", day(1, 9, 30), .weekdays), r("Lunch with Sam", day(1, 13, 0)), r("Gym", day(1, 18, 30), .weekly),
+            r("Dentist appointment", day(3, 10, 0)), r("Pay rent", day(5, 9, 0)), r("Water the plants", day(6, 19, 0), .weekly),
+        ]
+        func past(_ t: String, _ ago: Double, _ o: Outcome, _ note: String = "") -> Past {
+            Past(text: t, due: now.addingTimeInterval(-ago * 60), at: now.addingTimeInterval(-ago * 60 + 40), outcome: o, note: note)
+        }
+        st.history = [
+            past("Ship the release", 25, .done), past("Reply to emails", 70, .snoozed, "15 min"), past("Take vitamins", 140, .done),
+            past("Stretch your back", 200, .early), past("Standup", 690, .done),
+            past("Read 20 pages", 1500, .done), past("Gym", 1600, .skipped), past("Call the bank", 1750, .snoozed, "1 hour"),
+        ]
+    }
+}
+
 // MARK: - App
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         MainActor.assumeIsolated {
+            let args = CommandLine.arguments
+            if let i = args.firstIndex(of: "--snapshots"), i + 1 < args.count { Snapshots.run(args[i + 1]); return }
             Store.shared.onFire = { Overlay.shared.show($0) }
             Store.shared.tick() // fire anything missed while the app was closed
             registerHotKey()

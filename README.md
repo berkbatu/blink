@@ -6,6 +6,17 @@ A tiny macOS menu bar reminder app that refuses to be ignored.
 
 Add a reminder in two seconds; when it's due, Blink takes over **every screen** with a huge, animated alert (and a V8 engine roar that shakes the screen) until you deal with it.
 
+![The full-screen alert](docs/alert.png)
+
+| Menu bar panel | History | Quick add (⌥⌘B) |
+| --- | --- | --- |
+| ![Menu bar panel](docs/popover-dark.png) | ![History tab](docs/history.png) | ![Quick add panel](docs/quick-add.png) |
+
+<details><summary>Light mode</summary>
+
+![Menu bar panel in light mode](docs/popover-light.png)
+</details>
+
 ## Install
 
 You need a Mac on macOS 14 or newer with the Xcode Command Line Tools:
@@ -60,6 +71,8 @@ Reminders missed while your Mac was asleep fire as soon as it wakes.
 - `build.sh`: builds, signs ad hoc, installs and launches
 - `tools/icon.swift`: draws the app icon (flat, no gradients)
 - `tools/sounds.py`: synthesizes the chime, pop, done and engine sounds from scratch
+
+Screenshots come from the app itself (`Blink --snapshots docs`), rendered with sample data.
 
 Your data lives in `~/Library/Application Support/Blink/`.
 
