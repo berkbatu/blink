@@ -397,6 +397,60 @@ enum Fmt {
     static func when(_ d: Date) -> String { "\(day(d)) \(time(d))" }
 }
 
+// MARK: - Liquid Glass (macOS 26+), flat fallback on older systems
+
+extension View {
+    /// Glass for controls: pills, buttons, tabs. Content stays plain — glass is the layer you touch.
+    @ViewBuilder
+    func liquidGlass<S: InsettableShape>(_ shape: S, tint: Color? = nil, interactive: Bool = false) -> some View {
+        if snapshotMode {
+            self.background(FauxGlass(shape: shape, tint: tint))
+        } else if #available(macOS 26.0, *) {
+            self.glassEffect(Glass.regular.tint(tint).interactive(interactive), in: shape)
+        } else {
+            self.background(shape.fill(tint.map { AnyShapeStyle($0) } ?? AnyShapeStyle(Color.primary.opacity(0.07))))
+        }
+    }
+
+    /// Glass for whole floating panels.
+    @ViewBuilder
+    func glassPanel(radius: CGFloat) -> some View {
+        if snapshotMode {
+            self.background(FauxGlass(shape: RoundedRectangle(cornerRadius: radius), panel: true))
+        } else if #available(macOS 26.0, *) {
+            self.glassEffect(.regular, in: RoundedRectangle(cornerRadius: radius))
+        } else {
+            self.background(VisualEffect(material: .hudWindow, radius: radius))
+                .overlay(RoundedRectangle(cornerRadius: radius).strokeBorder(.white.opacity(0.12)))
+        }
+    }
+}
+
+/// Offscreen screenshots can't capture the compositor's real glass, so README shots use this stand-in.
+struct FauxGlass<S: InsettableShape>: View {
+    let shape: S
+    var tint: Color?
+    var panel = false
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        let dark = scheme == .dark
+        let base: Color = panel ? (dark ? Color(white: 0.11).opacity(0.86) : Color.white.opacity(0.82))
+                                : (dark ? Color.white.opacity(0.12) : Color.white.opacity(0.55))
+        shape.fill(tint ?? base)
+            .overlay(shape.strokeBorder(Color.white.opacity(dark ? 0.24 : 0.8), lineWidth: 1))
+            .shadow(color: .black.opacity(panel ? 0.25 : 0.08), radius: panel ? 24 : 3, y: panel ? 10 : 1)
+    }
+}
+
+/// Lets neighbouring glass shapes blend and morph into each other.
+struct GlassGroup<Content: View>: View {
+    var spacing: CGFloat = 8
+    @ViewBuilder var content: Content
+    var body: some View {
+        if #available(macOS 26.0, *) { GlassEffectContainer(spacing: spacing) { content } } else { content }
+    }
+}
+
 // MARK: - Small components
 
 struct EmojiBadge: View {
@@ -424,7 +478,7 @@ struct Pill: View {
         }
         .font(.r(11, .semibold))
         .padding(.horizontal, 10).padding(.vertical, 6)
-        .background(Capsule().fill(on ? AnyShapeStyle(warm) : AnyShapeStyle(.primary.opacity(hover ? 0.14 : 0.07))))
+        .liquidGlass(Capsule(), tint: on ? warm : (hover ? Color.primary.opacity(0.06) : nil), interactive: true)
         .foregroundStyle(on ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
         .contentShape(Capsule())
         .onHover { hover = $0 }
@@ -519,7 +573,7 @@ struct TimeScrubber: View {
             }
         }
         .frame(height: 46)
-        .background(RoundedRectangle(cornerRadius: 10).fill(.primary.opacity(hovering ? 0.06 : 0.035)))
+        .liquidGlass(RoundedRectangle(cornerRadius: 10), tint: hovering ? Color.primary.opacity(0.04) : nil, interactive: true)
         .contentShape(Rectangle())
         .onHover { hovering = $0; $0 ? NSCursor.resizeLeftRight.push() : NSCursor.pop() }
         .gesture(DragGesture(minimumDistance: 0)
@@ -634,7 +688,7 @@ struct Composer: View {
 
             TimeScrubber(target: $target, now: store.now) { chip = nil }
 
-            HStack(spacing: 5) {
+            GlassGroup(spacing: 5) { HStack(spacing: 5) {
                 ForEach(QuickTime.all) { q in
                     Button { withAnimation(.snappy) { chip = q.id; target = q.make() } } label: {
                         Pill(label: q.id, on: chip == q.id)
@@ -650,7 +704,7 @@ struct Composer: View {
                                 .datePickerStyle(.graphical).labelsHidden().padding(12)
                         }
                 }
-            }
+            } }
 
             Button(action: add) {
                 HStack {
@@ -661,7 +715,7 @@ struct Composer: View {
                 }
                 .font(.r(13, .bold))
                 .padding(.horizontal, 14).padding(.vertical, 10)
-                .background(RoundedRectangle(cornerRadius: 12).fill(warm).opacity(title.isEmpty ? 0.45 : 1))
+                .liquidGlass(RoundedRectangle(cornerRadius: 14), tint: warm.opacity(title.isEmpty ? 0.5 : 0.95), interactive: true)
                 .foregroundStyle(.white)
             }
             .buttonStyle(.plain)
@@ -779,7 +833,7 @@ struct PopoverView: View {
                 }
                 .font(.r(11, .medium))
                 .padding(.horizontal, 12).padding(.vertical, 8)
-                .background(Capsule().fill(.primary.opacity(0.06)))
+                .liquidGlass(Capsule())
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
@@ -803,7 +857,12 @@ struct PopoverView: View {
             }
             .font(.r(12, .semibold))
             .padding(.horizontal, 11).padding(.vertical, 6)
-            .background { if tab == t { Capsule().fill(warm).matchedGeometryEffect(id: "tab", in: ns) } }
+            .background {
+                if tab == t {
+                    Capsule().fill(.clear).liquidGlass(Capsule(), tint: warm, interactive: true)
+                        .matchedGeometryEffect(id: "tab", in: ns)
+                }
+            }
             .foregroundStyle(tab == t ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
             .contentShape(Capsule())
         }
@@ -997,7 +1056,7 @@ func iconButton(_ name: String, help: String, _ action: @escaping () -> Void) ->
     Button { withAnimation(.spring) { action() } } label: {
         Image(systemName: name).font(.system(size: 11, weight: .bold))
             .frame(width: 26, height: 26)
-            .background(Circle().fill(.primary.opacity(0.08)))
+            .liquidGlass(Circle(), interactive: true)
     }
     .buttonStyle(.plain).help(help).accessibilityLabel(help)
 }
@@ -1057,7 +1116,7 @@ struct PastRow: View {
                     Label("Again in 15m", systemImage: "arrow.uturn.forward")
                         .font(.r(10, .semibold))
                         .padding(.horizontal, 8).padding(.vertical, 5)
-                        .background(Capsule().fill(.primary.opacity(0.08)))
+                        .liquidGlass(Capsule(), interactive: true)
                 }
                 .buttonStyle(.plain)
             } else {
@@ -1108,7 +1167,7 @@ struct QuickAddView: View {
             if saved {
                 VStack(spacing: 10) {
                     ZStack {
-                        Circle().fill(warm).frame(width: 64, height: 64).shadow(color: Palette.pink.opacity(0.6), radius: 20)
+                        Circle().fill(.clear).frame(width: 64, height: 64).liquidGlass(Circle(), tint: warm)
                         Image(systemName: "checkmark").font(.system(size: 28, weight: .heavy)).foregroundStyle(.white)
                     }
                     Text("Saved. Blink’s on it.").font(.r(18, .bold))
@@ -1118,8 +1177,7 @@ struct QuickAddView: View {
         }
         .padding(24)
         .frame(width: 540)
-        .background(VisualEffect(material: .hudWindow, radius: 26))
-        .overlay(RoundedRectangle(cornerRadius: 26).strokeBorder(.white.opacity(0.12)))
+        .glassPanel(radius: 26)
         .onExitCommand(perform: close)
     }
 }
@@ -1208,7 +1266,7 @@ struct Bell: View {
                         .scaleEffect(1 + p * 2.6)
                         .opacity((1 - p) * 0.75)
                 }
-                Circle().fill(warm).frame(width: 180, height: 180)
+                Circle().fill(.clear).frame(width: 180, height: 180).liquidGlass(Circle(), tint: warm.opacity(0.85))
                     .scaleEffect(1 + 0.035 * sin(t * 3.5))
                 Text(emoji).font(.system(size: 96))
                     .rotationEffect(.degrees(sin(t * 30) * 18 * env), anchor: .top)
@@ -1322,7 +1380,7 @@ struct OverlayView: View {
                 }
                 .font(.r(20, .medium)).foregroundStyle(.white.opacity(0.65))
 
-                HStack(spacing: 12) {
+                GlassGroup(spacing: 12) { HStack(spacing: 12) {
                     snooze("5 min", 300, "1")
                     snooze("15 min", 900, "2")
                     snooze("1 hour", 3600, "3")
@@ -1333,12 +1391,12 @@ struct OverlayView: View {
                         }
                         .font(.r(19, .bold))
                         .padding(.horizontal, 34).padding(.vertical, 16)
-                        .background(Capsule().fill(.white))
+                        .liquidGlass(Capsule(), tint: .white.opacity(0.9), interactive: true)
                         .foregroundStyle(.black)
                     }
                     .buttonStyle(Press())
                     .keyboardShortcut(primary ? .defaultAction : nil)
-                }
+                } }
                 .padding(.top, 18)
 
                 if primary {
@@ -1388,8 +1446,7 @@ struct OverlayView: View {
             }
             .font(.r(16, .semibold))
             .padding(.horizontal, 22).padding(.vertical, 16)
-            .background(Capsule().fill(.white.opacity(0.1)))
-            .overlay(Capsule().strokeBorder(.white.opacity(0.22)))
+            .liquidGlass(Capsule(), interactive: true)
             .foregroundStyle(.white)
         }
         .buttonStyle(Press())
@@ -1528,17 +1585,25 @@ enum Snapshots {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         seed()
 
-        let desk = Color(red: 0.23, green: 0.25, blue: 0.31)
-        let paper = Color(red: 0.86, green: 0.87, blue: 0.9)
+        // A "wallpaper" of solid shapes so the glass has something to refract.
+        func wall(_ dark: Bool) -> some View {
+            ZStack {
+                (dark ? Color(red: 0.13, green: 0.14, blue: 0.19) : Color(red: 0.9, green: 0.9, blue: 0.93))
+                Circle().fill(Palette.coral).frame(width: 420).offset(x: -170, y: -260)
+                Circle().fill(Palette.violet).frame(width: 360).offset(x: 190, y: 120)
+                RoundedRectangle(cornerRadius: 60).fill(Palette.teal).frame(width: 300, height: 260).rotationEffect(.degrees(18)).offset(x: -150, y: 380)
+                Circle().fill(Palette.amber).frame(width: 200).offset(x: 210, y: -380)
+            }
+        }
+        let desk = wall(true), paper = wall(false)
         func panel(_ tab: PopoverView.Tab) -> some View {
             PopoverView(startTab: tab)
-                .background(VisualEffect(material: .popover, radius: 16))
-                .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.primary.opacity(0.1)))
+                .glassPanel(radius: 16)
         }
         add(panel(.upcoming).padding(36).background(paper), dark: false, "popover-light")
         add(panel(.upcoming).padding(36).background(desk), dark: true, "popover-dark")
         add(panel(.history).padding(36).background(desk), dark: true, "history")
-        add(QuickAddView(close: {}, initialText: "standup every weekday 9:30").padding(56).background(desk), dark: true, "quick-add")
+        add(QuickAddView(close: {}, initialText: "standup every weekday 9:30").padding(56).background(desk).clipped(), dark: true, "quick-add")
         add(OverlayView(reminder: Reminder(text: "Drink water, you camel", date: Date()), primary: true, model: OverlayModel(),
                         onDone: {}, onSnooze: { _, _ in })
                 .frame(width: 1512, height: 945), dark: true, "alert")

@@ -2,7 +2,7 @@
 
 # Blink
 
-A tiny macOS menu bar reminder app that refuses to be ignored.
+A tiny macOS menu bar reminder app that refuses to be ignored, built with Liquid Glass.
 
 Add a reminder in two seconds; when it's due, Blink takes over **every screen** with a huge, animated alert (and a V8 engine roar that shakes the screen) until you deal with it.
 
@@ -72,7 +72,7 @@ Reminders missed while your Mac was asleep fire as soon as it wakes.
 - `tools/icon.swift`: draws the app icon (flat, no gradients)
 - `tools/sounds.py`: synthesizes the chime, pop, done and engine sounds from scratch
 
-Screenshots come from the app itself (`Blink --snapshots docs`), rendered with sample data.
+Screenshots come from the app itself (`Blink --snapshots docs`), rendered with sample data. On macOS 26+ the controls and panels use real Liquid Glass, which only the window server can draw, so the screenshots show a close stand-in; on your screen the glass refracts whatever is behind it. Older macOS versions get a flat fallback.
 
 Your data lives in `~/Library/Application Support/Blink/`.
 
